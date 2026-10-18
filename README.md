@@ -4,6 +4,11 @@ Programme console **piloté par une interface TUI** : 5 calculs simples,
 chacun en version séquentielle (1 thread) puis parallèle (N threads avec rayon),
 **mesuré plusieurs fois** (min / médiane / max) pour prouver le gain.
 
+> 📖 **[USAGE.md](USAGE.md)** — à quoi sert ce programme et comment s'en servir :
+> écran par écran, tableau des touches, lecture du rapport, expériences à faire,
+> limites connues et dépannage. Ce README, lui, explique le **code** ligne par
+> ligne.
+
 ## 1. Installer et lancer
 
 ```bash
