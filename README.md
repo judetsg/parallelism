@@ -15,48 +15,78 @@ cargo run --release   # IMPORTANT : --release, sinon le tri est ~30x plus lent
 
 Les dépendances (`rayon`, `cursive`) se téléchargent seules au premier run.
 
+> ⚠️ Le programme est une **interface TUI** : il lui faut un vrai terminal.
+> Si la sortie est redirigée (`printf 'l' | cargo run`), il s'arrête avec un
+> message explicite au lieu de planter.
+
 L'interface est un vrai menu dans le terminal :
 
 ```
  Mini-calculateur parallele : Rust + rayon
  Coeurs detectes : 8
  1. Demonstration
- +-------------------------------------------+
- | 1. Addition de vecteurs (1 M)             |
- | 2. Produit scalaire (1 M)                 |
- | 3. Pi par rectangles (20 M)               |
- | 4. Tri d'un tableau (1 M)                 |
- | 5. Compression d'un fichier (64 Mo)       |
- +-------------------------------------------+
+┌─────────────────────────────────────────────┐
+│1. Addition de vecteurs (1 M)                 │
+│2. Produit scalaire (1 M)                     │
+│3. Pi par rectangles (20 M)                   │
+│4. Tri d'un tableau (1 M)                     │
+│5. Compression d'un fichier (64 Mo)           │
+└─────────────────────────────────────────────┘
  2. Nombre de threads          <- flèches + Entrée
+┌─────────────────────────────────────────────┐
+│1 thread(s)                                 ▒│
+│2 thread(s)                                 ││
+│3 thread(s)                                 ││
+└─────────────────────────────────────────────┘
  3. Repetitions par variante   <- 5 par défaut
- [ Lancer la mesure ]          <- clic, ou touche l
-
- l = lancer    fleches + Entree = choisir une valeur    q = quitter
+ Choix actuel : 1. Addition de vecteurs (1 M) — 8 threads
+                       < Lancer la mesure >
+ l = lancer la mesure    fleches + Entree = choisir une valeur
+ Astuce : cargo run --release, sinon le tri est ~30x plus lent
 ```
 
 Pendant la mesure, une barre de progression avance puis le rapport s'affiche :
 
 ```
- Termine.
- seq  : min    39.6 ms  mediane    45.4 ms  max    74.2 ms
- par  : min    29.8 ms  mediane    31.2 ms  max    37.6 ms
- gain : x1.46 (seq / par, sur la mediane)
- controle : c[100] = 300 (attendu 300) | identique ? true
+ Entree = retour au menu    q = quitter
+ seq  : min  302.4 ms  mediane  317.0 ms  max  345.1 ms
+ par  : min   69.6 ms  mediane   70.1 ms  max  162.8 ms
+ gain : x4.52 (seq / par, sur la mediane)
+ controle : 64 Mo -> 6 Mo (x10.3) | identique ? true | reconstitue intact ? true
+
+ 5. Compression d'un fichier (64 Mo)
+ 64 blocs de 1 Mo, compresses separement puis recolles
+ 8 threads | 5 repetitions par variante
+sequentiel 3/5
+██████████▊          27 %
 ```
 
-Mesures réelles sur 8 cœurs (release, 5 répétitions, les chiffres varient selon
-la charge machine) : Addition x1.5, Scalaire x2.8, Pi x4.5, Tri x2.3,
-Compression x4.7.
+**Mode d'emploi**
+
+| Touche | Menu | Écran de mesure |
+|---|---|---|
+| `↑` `↓` | choisir une valeur dans une liste | — |
+| `Entrée` | valider la valeur sélectionnée | **retour au menu** (la mesure est abandonnée) |
+| `Tab` | passer au champ / au bouton | — |
+| `l` | **lancer la mesure** | — |
+| `q` | quitter le programme | quitter le programme |
+
+Le nombre de répétitions est borné entre 1 et 50 : au-delà, la mesure dure
+plus longtemps pour une précision qui n'augmente plus vraiment.
+
+Mesures réelles sur 8 cœurs (release, 5 répétitions) : les gains vont de **x1.8**
+pour l'addition (limitée par la mémoire) à **x4.8** pour la compression, en
+passant par x2.1 pour le tri et x4.5 pour Pi. Les chiffres varient selon la
+charge de la machine : c'est exactement pour ça qu'on répète les mesures.
 
 ## 2. Fichiers
 
 ```
 Cargo.toml  -> rayon + cursive (cursive = l'interface TUI)
-src/main.rs -> tout le programme, ~670 lignes commentées
+src/main.rs -> tout le programme, ~700 lignes commentées
 ```
 
-## 3. Imports `src/main.rs:6-16`, ligne par ligne
+## 3. Imports `src/main.rs:6-17`, ligne par ligne
 
 ```rust
 use cursive::event::{Event, Key};     // :6 evenements clavier
@@ -64,15 +94,19 @@ use cursive::theme::Effect;           // :7 effets d'affichage (gras, gris)
 use cursive::view::{Nameable, Resizable}; // :8 nommer une vue, fixer sa taille
 use cursive::views::{Button, ...};    // :9 les briques de l'interface
 use cursive::Cursive;                 // :10 l'application TUI
-use rayon::prelude::*;                // :11 par_iter, sum, par_sort_unstable...
-use rayon::ThreadPoolBuilder;         // :12 pool a N threads
-use std::sync::atomic::{AtomicBool, Ordering}; // :13 annulation
-use std::sync::mpsc::{self, Sender};  // :14 canal worker -> interface
-use std::sync::Mutex;                 // :15 le canal doit etre partageable
-use std::time::{Duration, Instant};   // :16 chrono
+use std::io::IsTerminal;              // :11 verifier qu'on a un vrai terminal
+use rayon::prelude::*;                // :12 par_iter, sum, par_sort_unstable...
+use rayon::ThreadPoolBuilder;         // :13 pool a N threads
+use std::sync::atomic::{AtomicBool, Ordering}; // :14 annulation
+use std::sync::mpsc::{self, Sender};  // :15 canal worker -> interface
+use std::sync::Mutex;                 // :16 le canal doit etre partageable
+use std::time::{Duration, Instant};   // :17 chrono
 ```
 
-## 4. `nb_threads()` `src/main.rs:18`
+- `IsTerminal` (`:11`) évite le panic de crossterm quand la sortie est
+  redirigée : on affiche un message lisible et on sort avec le code 1.
+
+## 4. `nb_threads()` `src/main.rs:19`
 
 ```rust
 std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
@@ -83,7 +117,7 @@ std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
 
 ## 5. Addition vecteurs
 
-### `vector_add_seq()` `src/main.rs:25` — référence 1 thread
+### `vector_add_seq()` `src/main.rs:26` — référence 1 thread
 
 ```rust
 for i in 0..a.len() { c[i] = a[i] + b[i]; }
@@ -92,7 +126,7 @@ for i in 0..a.len() { c[i] = a[i] + b[i]; }
 - `a: &[f64]` = vue lecture, `c: &mut [f64]` = vue écriture.
 - `i` va de 0 à n-1, ex: `c[100]=100+200=300`.
 
-### `vector_add_par()` `src/main.rs:33` — version parallèle
+### `vector_add_par()` `src/main.rs:34` — version parallèle
 
 ```rust
 a.par_iter()             // vue parallèle de a, rayon la découpe en chunks
@@ -106,7 +140,7 @@ a.par_iter()             // vue parallèle de a, rayon la découpe en chunks
 
 ## 6. Produit scalaire (reduction)
 
-### `dot_product_seq()` `src/main.rs:45`
+### `dot_product_seq()` `src/main.rs:46`
 
 ```rust
 let mut sum = 0.0;
@@ -114,7 +148,7 @@ for i in 0..a.len() { sum += a[i] * b[i]; }
 sum
 ```
 
-### `dot_product_par()` `src/main.rs:55` — somme parallèle
+### `dot_product_par()` `src/main.rs:56` — somme parallèle
 
 ```rust
 a.par_iter().zip(b.par_iter()).map(|(&x, &y)| x * y).sum()
@@ -129,7 +163,7 @@ a.par_iter().zip(b.par_iter()).map(|(&x, &y)| x * y).sum()
 
 Aire sous `4/(1+x²)` entre 0 et 1 = Pi. On coupe en `steps` rectangles.
 
-### `pi_seq()` `src/main.rs:63`
+### `pi_seq()` `src/main.rs:64`
 
 ```rust
 let step = 1.0 / steps as f64;
@@ -140,7 +174,7 @@ for i in 0..steps {
 sum * step                          // aire = somme hauteurs × largeur
 ```
 
-### `pi_par()` `src/main.rs:75`
+### `pi_par()` `src/main.rs:76`
 
 ```rust
 (0..steps).into_par_iter()
@@ -154,7 +188,7 @@ sum * step                          // aire = somme hauteurs × largeur
 
 Cas de la vie réelle : trier une colonne de 1 M de valeurs.
 
-### `hashe()` `src/main.rs:100` + `genere_valeurs()` `src/main.rs:113`
+### `hashe()` `src/main.rs:101` + `genere_valeurs()` `src/main.rs:114`
 
 ```rust
 fn hashe(mut x: u64) -> u64 {   // splitmix64, reproductible partout
@@ -173,7 +207,7 @@ fn genere_valeurs(n: usize) -> Vec<u32> {
   à chaque run.
 - Permet de fabriquer du hasard **sans le crate `rand`**.
 
-### `tri_seq()` `src/main.rs:120` / `tri_par()` `src/main.rs:126`
+### `tri_seq()` `src/main.rs:121` / `tri_par()` `src/main.rs:127`
 
 ```rust
 v.sort_unstable();          // 1 thread
@@ -188,7 +222,7 @@ v.par_sort_unstable();      // rayon découpe, trie, fusionne
 Cas de la vie réelle : « zippe le fichier avant de l'envoyer ». 64 Mo coupés
 en 64 blocs de 1 Mo, chaque bloc compressé indépendamment.
 
-### `genere_fichier()` `src/main.rs:134` — le faux fichier source
+### `genere_fichier()` `src/main.rs:135` — le faux fichier source
 
 ```rust
 while i < n {
@@ -200,7 +234,7 @@ while i < n {
 }
 ```
 
-### `compresse_rle()` `src/main.rs:149` — la compression d'UN bloc
+### `compresse_rle()` `src/main.rs:150` — la compression d'UN bloc
 
 ```rust
 while i < bloc.len() {
@@ -216,7 +250,7 @@ while i < bloc.len() {
 - Un bloc est compressible **tout seul** : c'est ce qui rend la compression
   parallélisable. Un seul flux ne le serait pas.
 
-### `compresse_seq()` `src/main.rs:178` / `compresse_par()` `src/main.rs:184`
+### `compresse_seq()` `src/main.rs:179` / `compresse_par()` `src/main.rs:185`
 
 ```rust
 blocs.iter().map(|b| compresse_rle(b)).collect()      // seq
@@ -232,7 +266,7 @@ Chaque démonstration expose 2 variantes (`seq` et `par`) sous forme de
 fonctions `run_*` qui **préparent leurs données puis ne chronomètrent que le
 calcul** : sinon on mesurerait la création des tableaux.
 
-### `run_addition()` `src/main.rs:195`
+### `run_addition()` `src/main.rs:196`
 
 ```rust
 const PASSES: usize = 10;      // sinon le goulot est la mémoire, pas le CPU
@@ -248,12 +282,12 @@ let d = t0.elapsed();                                      // chrono stop
   on ajoute du calcul et le gain devient visible. Tout ne se parallélise pas
   aussi bien — c'est le message principal de cet exemple.
 
-Les 5 fonctions : `run_addition` `:195`, `run_dot` `:224`, `run_pi` `:239`,
-`run_tri` `:252`, `run_compression` `:268`.
+Les 5 fonctions : `run_addition` `:196`, `run_dot` `:225`, `run_pi` `:240`,
+`run_tri` `:253`, `run_compression` `:269`.
 
 ## 11. Mesures : min / médiane / max
 
-### `mesurer()` `src/main.rs:307`
+### `mesurer()` `src/main.rs:308`
 
 ```rust
 for _ in 0..reps {
@@ -267,21 +301,21 @@ Some(Stats { min: durees[0], mediane: durees[reps / 2], max: durees[reps - 1] })
 - Une seule mesure est du bruit (un autre processus, un turbo CPU...). On
   répète 5 fois par défaut et on affiche min / médiane / max.
 - La **médiane** sert au calcul du gain : elle ignore les pics parasites.
-- `ANNULATION` `src/main.rs:287` permet de quitter l'écran sans attendre un
+- `ANNULATION` `src/main.rs:288` permet de quitter l'écran sans attendre un
   résultat qui ne sera plus affiché.
 
-### `formater()` `src/main.rs:326` — le rapport affiché
+### `formater()` `src/main.rs:327` — le rapport affiché
 
 ```
- seq  : min    39.6 ms  mediane    45.4 ms  max    74.2 ms
- par  : min    29.8 ms  mediane    31.2 ms  max    37.6 ms
- gain : x1.46 (seq / par, sur la mediane)
+ seq  : min  302.4 ms  mediane  317.0 ms  max  345.1 ms
+ par  : min   69.6 ms  mediane   70.1 ms  max  162.8 ms
+ gain : x4.52 (seq / par, sur la mediane)
 ```
 
-- `gain = mediane_seq / mediane_par` : x1.46 veut dire « le parallèle a mis
-  1.46 fois moins de temps ».
+- `gain = mediane_seq / mediane_par` : x4.52 veut dire « le parallèle a mis
+  4,52 fois moins de temps ».
 
-### `Demo::controle()` `src/main.rs:415` — la vérification
+### `Demo::controle()` `src/main.rs:416` — la vérification
 
 - Chaque démo compare sa sortie seq et sa sortie par (ou donne une valeur
   de référence : `c[100] = 300`, `3.141593`, aller-retour de compression).
@@ -289,7 +323,7 @@ Some(Stats { min: durees[0], mediane: durees[reps / 2], max: durees[reps - 1] })
 
 ## 12. L'interface TUI
 
-### `lancer()` `src/main.rs:464` — le worker
+### `lancer()` `src/main.rs:465` — le worker
 
 ```rust
 let seq = match mesurer(reps, || {
@@ -303,7 +337,7 @@ let seq = match mesurer(reps, || {
   jamais.
 - 3 phases : `reps` fois en seq, `reps` fois en par, puis 1 contrôle.
 
-### `maj_ecran()` `src/main.rs:520` — l'affichage
+### `maj_ecran()` `src/main.rs:521` — l'affichage
 
 ```rust
 Etape::Avance { texte, fait, total } => {
@@ -313,8 +347,36 @@ Etape::Avance { texte, fait, total } => {
 ```
 
 - `call_on_name("barre", ...)` retrouve la vue par son nom et la modifie.
+- ⚠️ Une vue ne doit être nommée **qu'une seule fois** : deux `with_name`
+  imbriqués rendent le `call_on_name` incapable de retrouver le bon type, et
+  la mise à jour est silencieusement ignorée.
+- La barre est dessinée par cursive en **vidéo inverse** (une bande colorée,
+  pas des caractères `█`) : copier le terminal en texte brut la fait
+  disparaître, il faut copier avec les attributs (`tmux capture-pane -e`).
 
-### `main()` `src/main.rs:636` — la boucle
+### `ecran_mesure()` `src/main.rs:551` — l'écran de mesure
+
+- `full_screen()` : l'écran couvre tout le terminal, sinon le menu reste
+  visible en dessous et les deux se mélangent à l'écran.
+- `OnEventView` intercepte `Entrée` (retour au menu, la mesure est annulée)
+  et `q` (fermeture).
+- La barre est limitée à 40 colonnes, sinon elle s'étire sur toute la largeur
+  et son pourcentage part dans la marge de droite.
+
+### `maj_resume()` `src/main.rs:583` et `ecran_menu()` `src/main.rs:617`
+
+```rust
+demos.on_select(|siv, _| maj_resume(siv));    // la liste des demos pilote le resume
+threads.on_select(|siv, _| maj_resume(siv));  // la liste des threads aussi
+```
+
+- La liste des threads va de 1 à 2× le nombre de cœurs : la ligne sélectionnée
+  n'est pas forcément visible. `on_select` met donc à jour une ligne de résumé
+  (« Choix actuel : … — 8 threads »).
+- `maj_resume` est une **fonction** et non une closure : `on_select` exige
+  une closure `'static`, qui ne peut pas capturer une variable locale.
+
+### `main()` `src/main.rs:659` — la boucle
 
 ```rust
 siv.set_fps(30);   // 30 images/s : la barre bouge même sans frappe
@@ -325,6 +387,8 @@ siv.add_global_callback(Event::Refresh, move |siv| { /* vide le canal */ });
   elle vide le canal `mpsc` et met la barre à jour.
 - Le `Mutex` autour du `Receiver` est obligatoire : cursive exige des
   callbacks `Send + Sync`, et un `Receiver` seul n'est que `Send`.
+- `IsTerminal` `src/main.rs:11` : sans vrai terminal, crossterm panique ; on
+  teste donc `stdin().is_terminal()` et on affiche un message lisible.
 
 ## 13. Comment ça fonctionne (à réciter)
 

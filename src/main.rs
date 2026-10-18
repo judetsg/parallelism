@@ -8,6 +8,7 @@ use cursive::theme::Effect; // effets d'affichage : Bold = gras, Dim = gris
 use cursive::view::{Nameable, Resizable}; // with_name() nomme une vue, fixed_* fixe sa taille
 use cursive::views::{Button, EditView, LinearLayout, OnEventView, Panel, ProgressBar, ScrollView, SelectView, TextView}; // briques de l'interface
 use cursive::Cursive; // l'application TUI elle-meme
+use std::io::IsTerminal; // is_terminal() : dit si stdin est un vrai terminal
 use rayon::prelude::*; // importe par_iter, into_par_iter, sum, for_each, par_sort_unstable de rayon
 use rayon::ThreadPoolBuilder; // importe le constructeur de pool a N threads
 use std::sync::atomic::{AtomicBool, Ordering}; // drapeau d'annulation partage entre l'ecran et le worker
@@ -554,13 +555,14 @@ fn ecran_mesure(siv: &mut Cursive, demo: Demo, n_threads: usize, reps: usize, tx
     let detail = format!(" {} ", demo.detail()); // la phrase qui explique l'exemple
     let contexte = format!(" {n_threads} threads | {reps} repetitions par variante ",); // le contexte de mesure
     let vue = LinearLayout::vertical()
+        .child(TextView::new(" Entree = retour au menu    q = quitter ").style(Effect::Dim)) // aide, en haut
+        .child(TextView::new("").with_name("resultats")) // le rapport, vide au depart
         .child(TextView::new(titre).style(Effect::Bold)) // titre de la demonstration
         .child(TextView::new(detail).style(Effect::Dim)) // rappel du principe utilise
         .child(TextView::new(contexte).style(Effect::Dim)) // threads et repetitions
         .child(TextView::new("Preparation...").with_name("etape")) // libelle de l'avancement
-        .child(ProgressBar::new().with_name("barre")) // barre qui bouge toute seule
-        .child(TextView::new("").with_name("resultats")) // le rapport, vide au depart
-        .child(TextView::new(" Entree = retour au menu    q = quitter ").style(Effect::Dim)); // aide
+        // barre bornee a 40 colonnes : sinon elle s'etire et son libelle part a droite
+        .child(ProgressBar::new().with_name("barre").fixed_width(40)); // barre qui bouge toute seule
     let couche = OnEventView::new(vue)
         .on_event(Key::Enter, |siv: &mut Cursive| {
             // Entree : on quitte l'ecran et on previent le worker
@@ -572,10 +574,25 @@ fn ecran_mesure(siv: &mut Cursive, demo: Demo, n_threads: usize, reps: usize, tx
             ANNULATION.store(true, Ordering::Relaxed); // le worker s'arrete
             siv.quit(); // fermeture complete
         }); // fin de la touche q
-    siv.add_fullscreen_layer(couche.fixed_size((72, 16))); // l'ecran occupe tout le terminal
+    // full_screen : l'ecran couvre tout le terminal, le menu ne reste pas visible dessous
+    siv.add_fullscreen_layer(couche.full_screen()); // taille = celle du terminal
     // le worker part dans son propre thread, il ne touche jamais a l'interface
     std::thread::spawn(move || lancer(demo, n_threads, reps, tx)); // le canal tx lui sert a parler a l'ecran
 } // fin ecran_mesure
+
+fn maj_resume(siv: &mut Cursive) {
+    // ecrit dans le resume le choix actuel, pour le voir sans faire defiler les listes
+    let demo = siv
+        .call_on_name("demos", |v: &mut SelectView<Demo>| v.selection().map(|d| *d))
+        .flatten()
+        .unwrap_or(Demo::Addition); // la demo actuellement pointee
+    let n_threads = siv
+        .call_on_name("threads", |v: &mut SelectView<usize>| v.selection().map(|t| *t))
+        .flatten()
+        .unwrap_or(1); // le nombre de threads actuellement pointe
+    let txt = format!(" Choix actuel : {} — {n_threads} threads", demo.nom()); // le resume
+    siv.call_on_name("resume", |v: &mut TextView| v.set_content(txt)); // on l'ecrit dans la vue
+} // fin maj_resume
 
 fn lancer_depuis_le_menu(siv: &mut Cursive, tx: &Sender<Etape>) {
     // lit les 3 champs du menu puis ouvre l'ecran de mesure
@@ -612,6 +629,10 @@ fn ecran_menu(siv: &mut Cursive, tx: &Sender<Etape>) {
     // selected() est un constructeur : il renvoie la liste avec la ligne deja posee
     let threads = threads.selected((detectes - 1).min(max_threads - 1)); // defaut = nombre de coeurs
     let repetitions = EditView::new().content("5").with_name("reps").fixed_width(8); // 5 repetitions par defaut
+    let resume = TextView::new(""); // rappel du choix courant, nomme plus bas avec with_name
+    // on_select est appele a chaque changement de ligne, on actualise le resume
+    let demos = demos.on_select(|siv, _| maj_resume(siv)); // la liste des demos pilote le resume
+    let threads = threads.on_select(|siv, _| maj_resume(siv)); // la liste des threads aussi
     let tx_bouton = tx.clone(); // le bouton doit posseder son propre exemplaire du canal
     let bouton = Button::new(" Lancer la mesure ", move |siv: &mut Cursive| {
         // clic sur le bouton = lancement direct
@@ -623,18 +644,28 @@ fn ecran_menu(siv: &mut Cursive, tx: &Sender<Etape>) {
         .child(TextView::new(" 1. Demonstration ")) // etape 1
         .child(Panel::new(ScrollView::new(demos.with_name("demos")).fixed_height(5))) // liste scrollable
         .child(TextView::new(" 2. Nombre de threads ")) // etape 2
-        .child(Panel::new(ScrollView::new(threads.with_name("threads")).fixed_height(3))) // liste scrollable
+        .child(Panel::new(ScrollView::new(threads.with_name("threads")).fixed_height(5))) // liste scrollable
         .child(TextView::new(" 3. Repetitions par variante ")) // etape 3
         .child(repetitions) // champ a remplir
+        .child(resume.with_name("resume")) // rappel du choix courant
         .child(bouton) // bouton de lancement
         .child(TextView::new(" l = lancer la mesure    fleches + Entree = choisir une valeur ").style(Effect::Dim)) // raccourcis
         .child(TextView::new(" Astuce : cargo run --release, sinon le tri est ~30x plus lent ").style(Effect::Dim)); // conseil
-    siv.add_fullscreen_layer(vue.fixed_size((72, 21))); // le menu occupe tout le terminal
+    siv.add_fullscreen_layer(vue.full_screen()); // le menu occupe tout le terminal
+    maj_resume(siv); // on affiche le resume une premiere fois
     siv.focus_name("demos").ok(); // le focus part de la liste des demonstrations
 } // fin ecran_menu
 
 fn main() {
     // point d'entree : on prepare l'interface puis on boucle sur les evenements
+    if !std::io::stdin().is_terminal() {
+        // pas de vrai terminal (stdin redirige, sortie capturee par un script ou un tube) :
+        // on previent clairement au lieu de laisser crossterm paniquer tout seul
+        eprintln!("Ce programme est une interface TUI : il a besoin d'un vrai terminal.");
+        eprintln!("Lance-le directement : cargo run --release");
+        eprintln!("(pas de redirection du genre : printf 'l' | cargo run)");
+        std::process::exit(1); // on sort avec le code erreur
+    } // fin du test "vrai terminal"
     let mut siv = cursive::default(); // cree l'application TUI (crossterm sur le terminal)
     let (tx, rx) = mpsc::channel::<Etape>(); // le worker envoie ses news par tx, l'interface les lit
     let reception = Mutex::new(rx); // Mutex : cursive exige un callback Send + Sync
