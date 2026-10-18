@@ -1,8 +1,8 @@
 # Mini-calculateur parallèle — Rust + rayon (expliqué ligne par ligne)
 
-Programme console débutant : 5 petits calculs, chacun en version
-séquentielle (1 thread) puis parallèle (N threads avec rayon),
-avec chrono pour prouver le gain.
+Programme console **piloté par une interface TUI** : 5 calculs simples,
+chacun en version séquentielle (1 thread) puis parallèle (N threads avec rayon),
+**mesuré plusieurs fois** (min / médiane / max) pour prouver le gain.
 
 ## 1. Installer et lancer
 
@@ -10,86 +10,103 @@ avec chrono pour prouver le gain.
 rustc --version   # doit afficher une version, sinon installer via https://rustup.rs/
 cargo --version
 cd parallelism
-cargo run            # pour jouer
-cargo run --release  # pour des temps réalistes (le tri est ~30x plus lent en debug)
+cargo run --release   # IMPORTANT : --release, sinon le tri est ~30x plus lent
 ```
 
-`rayon = "1"` dans `Cargo.toml` se télécharge seul au premier run.
+Les dépendances (`rayon`, `cursive`) se téléchargent seules au premier run.
 
-Menu :
+L'interface est un vrai menu dans le terminal :
+
 ```
-1. Addition vecteurs (seq vs par)
-2. Produit scalaire (seq vs par)
-3. Pi (seq vs par)
-4. Changer nb threads
-5. Tri 1M valeurs (seq vs par)
-6. Compression 64 Mo (seq vs par)
-0. Quitter
+ Mini-calculateur parallele : Rust + rayon
+ Coeurs detectes : 8
+ 1. Demonstration
+ +-------------------------------------------+
+ | 1. Addition de vecteurs (1 M)             |
+ | 2. Produit scalaire (1 M)                 |
+ | 3. Pi par rectangles (20 M)               |
+ | 4. Tri d'un tableau (1 M)                 |
+ | 5. Compression d'un fichier (64 Mo)       |
+ +-------------------------------------------+
+ 2. Nombre de threads          <- flèches + Entrée
+ 3. Repetitions par variante   <- 5 par défaut
+ [ Lancer la mesure ]          <- clic, ou touche l
+
+ l = lancer    fleches + Entree = choisir une valeur    q = quitter
 ```
 
-Mesuré sur 8 threads, en `--release` (les chiffres varient selon la charge de la
-machine) : Addition ~17ms→~7ms, Scalaire ~5ms→~3ms, Pi ~195ms→~81ms,
-Tri ~120ms→~33ms, Compression ~325ms→~75ms.
+Pendant la mesure, une barre de progression avance puis le rapport s'affiche :
+
+```
+ Termine.
+ seq  : min    39.6 ms  mediane    45.4 ms  max    74.2 ms
+ par  : min    29.8 ms  mediane    31.2 ms  max    37.6 ms
+ gain : x1.46 (seq / par, sur la mediane)
+ controle : c[100] = 300 (attendu 300) | identique ? true
+```
+
+Mesures réelles sur 8 cœurs (release, 5 répétitions, les chiffres varient selon
+la charge machine) : Addition x1.5, Scalaire x2.8, Pi x4.5, Tri x2.3,
+Compression x4.7.
 
 ## 2. Fichiers
 
 ```
-Cargo.toml  -> rayon = "1", rien d'autre
-src/main.rs -> tout le programme, ~320 lignes commentées
+Cargo.toml  -> rayon + cursive (cursive = l'interface TUI)
+src/main.rs -> tout le programme, ~670 lignes commentées
 ```
 
-## 3. Imports `src/main.rs:5-8`, ligne par ligne
+## 3. Imports `src/main.rs:6-16`, ligne par ligne
 
 ```rust
-use rayon::prelude::*;      // :5 import .par_iter(), .into_par_iter(), .sum(), .for_each(), .par_sort_unstable()
-use rayon::ThreadPoolBuilder; // :6 pour creer un pool a N threads (menu option 4)
-use std::io::{self, Write};   // :7 lire clavier + flush pour afficher "> " aussitot
-use std::time::Instant;       // :8 chrono seq vs par
+use cursive::event::{Event, Key};     // :6 evenements clavier
+use cursive::theme::Effect;           // :7 effets d'affichage (gras, gris)
+use cursive::view::{Nameable, Resizable}; // :8 nommer une vue, fixer sa taille
+use cursive::views::{Button, ...};    // :9 les briques de l'interface
+use cursive::Cursive;                 // :10 l'application TUI
+use rayon::prelude::*;                // :11 par_iter, sum, par_sort_unstable...
+use rayon::ThreadPoolBuilder;         // :12 pool a N threads
+use std::sync::atomic::{AtomicBool, Ordering}; // :13 annulation
+use std::sync::mpsc::{self, Sender};  // :14 canal worker -> interface
+use std::sync::Mutex;                 // :15 le canal doit etre partageable
+use std::time::{Duration, Instant};   // :16 chrono
 ```
 
-Sans `:5`, `par_iter` n'existe pas. Sans `:6`, impossible de fixer N.
-Sans `:7`, le `> ` ne s'affiche pas avant la frappe. Sans `:8`, pas de mesure.
-
-## 4. `nb_threads()` `src/main.rs:10`
+## 4. `nb_threads()` `src/main.rs:18`
 
 ```rust
 std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
 ```
 
 - Demande au système le nb de coeurs logiques (ex: 8).
-- `.get()` convertit en `usize`.
-- `.unwrap_or(4)` : secours si le système ne répond pas.
-- Appelé une fois dans `main()` `src/main.rs:276` pour la valeur initiale.
+- Le menu propose `1 .. nombre de coeurs x2` pour voir le surcoût.
 
 ## 5. Addition vecteurs
 
-### `vector_add_seq()` `src/main.rs:17` — référence 1 thread
+### `vector_add_seq()` `src/main.rs:25` — référence 1 thread
 
 ```rust
 for i in 0..a.len() { c[i] = a[i] + b[i]; }
 ```
 
 - `a: &[f64]` = vue lecture, `c: &mut [f64]` = vue écriture.
-- `i` va de 0 à n-1, on fait `c[i] = a[i]+b[i]`, ex: `c[100]=100+200=300`.
-- Sert uniquement de temps de référence.
+- `i` va de 0 à n-1, ex: `c[100]=100+200=300`.
 
-### `vector_add_par()` `src/main.rs:25` — version parallèle
+### `vector_add_par()` `src/main.rs:33` — version parallèle
 
 ```rust
-a.par_iter()            // vue parallèle de a, rayon va la découper en chunks
-  .zip(b.par_iter())    // colle b : paire (a[i], b[i]) pour chaque i
-  .zip(c.par_iter_mut())// colle c en écriture : ((a[i],b[i]), c[i])
+a.par_iter()             // vue parallèle de a, rayon la découpe en chunks
+  .zip(b.par_iter())     // paire (a[i], b[i]) pour chaque i
+  .zip(c.par_iter_mut()) // c[i] en écriture : ((a[i],b[i]), c[i])
   .for_each(|((&x, &y), z)| { *z = x + y; });
 ```
 
-- `&x` = copie de `a[i]`, `&y` = copie de `b[i]`, `z` = accès écriture à `c[i]`.
-- `*z = ...` = écrire dans la case.
 - Chaque `c[i]` est écrit une seule fois par un seul thread → pas de conflit.
 - Fin du `for_each` = barrière : on attend tous les threads.
 
 ## 6. Produit scalaire (reduction)
 
-### `dot_product_seq()` `src/main.rs:37`
+### `dot_product_seq()` `src/main.rs:45`
 
 ```rust
 let mut sum = 0.0;
@@ -97,57 +114,50 @@ for i in 0..a.len() { sum += a[i] * b[i]; }
 sum
 ```
 
-- Un seul `sum`, un seul thread, aucun conflit.
-
-### `dot_product_par()` `src/main.rs:47` — somme parallèle
+### `dot_product_par()` `src/main.rs:55` — somme parallèle
 
 ```rust
 a.par_iter().zip(b.par_iter()).map(|(&x, &y)| x * y).sum()
 ```
 
-- `.map(|(&x,&y)| x*y)` : chaque thread calcule ses produits sur son morceau.
-- `.sum()` : rayon additionne les sommes partielles à la fin.
-- Si on partageait `sum` directement entre threads, 2 threads écriraient
-  en même temps et le résultat serait faux.
-- La parade "somme locale + somme finale" évite ce conflit.
+- Chaque thread calcule ses produits sur son morceau, `.sum()` additionne
+  les sommes partielles à la fin.
+- Si `sum` était partagé entre threads, 2 threads écriraient en même temps :
+  la parade est « somme locale + somme finale ».
 
 ## 7. Pi par rectangles
 
-Idée maths : aire sous `4/(1+x²)` entre 0 et 1 = Pi.
-On coupe en `steps` rectangles de largeur `step = 1/steps`.
+Aire sous `4/(1+x²)` entre 0 et 1 = Pi. On coupe en `steps` rectangles.
 
-### `pi_seq()` `src/main.rs:55`
+### `pi_seq()` `src/main.rs:63`
 
 ```rust
-let step = 1.0 / steps as f64;   // largeur, ex: 1/20M
+let step = 1.0 / steps as f64;
 for i in 0..steps {
-  let x = (i as f64 + 0.5) * step; // milieu du rectangle i
-  sum += 4.0 / (1.0 + x * x);      // hauteur au milieu
+  let x = (i as f64 + 0.5) * step;  // milieu du rectangle
+  sum += 4.0 / (1.0 + x * x);       // hauteur
 }
 sum * step                          // aire = somme hauteurs × largeur
 ```
 
-### `pi_par()` `src/main.rs:67`
+### `pi_par()` `src/main.rs:75`
 
 ```rust
-let step = 1.0 / steps as f64;  // partagé en lecture seule, pas de conflit
-(0..steps).into_par_iter()      // range parallèle : rayon distribue les i
-  .map(|i| { let x = (i as f64+0.5)*step; 4.0/(1.0+x*x) }) // hauteur par thread
-  .sum::<f64>() * step          // reduction puis × largeur
+(0..steps).into_par_iter()
+  .map(|i| { let x = (i as f64+0.5)*step; 4.0/(1.0+x*x) })
+  .sum::<f64>() * step
 ```
 
 - Même formule que seq, seul le partage des `i` change.
-- 20M d'itérations : le plus lourd, speedup le plus visible.
 
 ## 8. Trier un gros tableau
 
-Cas de la vie réelle : trier une colonne de 1 M de valeurs, comme quand on
-trie 1 M de lignes dans un tableur.
+Cas de la vie réelle : trier une colonne de 1 M de valeurs.
 
-### `hashe()` `src/main.rs:152` + `genere_valeurs()` `src/main.rs:162`
+### `hashe()` `src/main.rs:100` + `genere_valeurs()` `src/main.rs:113`
 
 ```rust
-fn hashe(mut x: u64) -> u64 {        // splitmix64 : mélange reproductible
+fn hashe(mut x: u64) -> u64 {   // splitmix64, reproductible partout
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = x;
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -159,176 +169,188 @@ fn genere_valeurs(n: usize) -> Vec<u32> {
 }
 ```
 
-- `hashe(i)` : même index → même valeur, donc **les données sont identiques à chaque run**.
-- Ça évite d'ajouter le crate `rand` : `Cargo.toml` reste à `rayon` tout seul.
-- Le tableau est dans le désordre avant tri, comme une vraie colonne de tableur.
+- `hashe(i)` : même index → même valeur, donc les données sont identiques
+  à chaque run.
+- Permet de fabriquer du hasard **sans le crate `rand`**.
 
-### `tri_seq()` `src/main.rs:169` — référence 1 thread
-
-```rust
-v.sort_unstable();
-```
-
-- Trie en place, un seul thread, tout le tableau d'un coup.
-
-### `tri_par()` `src/main.rs:174` — version parallèle
+### `tri_seq()` `src/main.rs:120` / `tri_par()` `src/main.rs:126`
 
 ```rust
-v.par_sort_unstable();
+v.sort_unstable();          // 1 thread
+v.par_sort_unstable();      // rayon découpe, trie, fusionne
 ```
 
-- **Un seul appel** : rayon découpe la slice, trie chaque morceau en parallèle,
-  puis fusionne les morceaux déjà triés entre eux (divide & merge).
-- Ici le parallélisme est "gratuit" : pas de boucle à écrire, pas de bloc de
-  Résultat à recoller, rayon gère le découpage et la fusion.
-- Le tri est le meilleur exemple pour montrer qu'on n'a pas toujours à
-  gérer les threads soi-même.
-
-Contrôle dans `demo_tri()` `src/main.rs:180` : `trie ? true` (ordre croissant)
-et `identique ? true` (les deux tris donnent le même tableau).
+- **Un seul appel** : pas de boucle à écrire, pas de résultat à recoller.
+- Le meilleur exemple pour montrer qu'on n'a pas toujours à gérer les threads.
 
 ## 9. Compresser un gros fichier
 
-Cas de la vie réelle : « zipe le fichier avant de l'envoyer ». Un fichier de
-64 Mo qu'on découpe en 64 blocs de 1 Mo, chaque bloc compressé indépendamment.
+Cas de la vie réelle : « zippe le fichier avant de l'envoyer ». 64 Mo coupés
+en 64 blocs de 1 Mo, chaque bloc compressé indépendamment.
 
-### `genere_fichier()` `src/main.rs:201` — le faux fichier source
+### `genere_fichier()` `src/main.rs:134` — le faux fichier source
 
 ```rust
 while i < n {
   let h = hashe(i as u64);
   let longueur = (h % 40) as usize + 1;   // suite de 1 à 40 octets identiques
   let fin = (i + longueur).min(n);
-  v.resize(fin, (h >> 8) as u8);          // remplit de i à fin avec le même octet
+  v.resize(fin, (h >> 8) as u8);
   i = fin;
 }
 ```
 
-- On fabrique 64 Mo de données **compressibles** (des répétitions), comme un
-  texte, un log ou une image.
-- `resize(..., octet)` remplit d'une seule traite les octets manquants.
-
-### `compresse_rle()` `src/main.rs:215` — la compression d'UN bloc
+### `compresse_rle()` `src/main.rs:149` — la compression d'UN bloc
 
 ```rust
 while i < bloc.len() {
-  let v = bloc[i];                    // 1er octet de la suite
-  let mut k = 1;                      // longueur (v compte déjà)
+  let v = bloc[i];
+  let mut k = 1;
   while i + k < bloc.len() && bloc[i + k] == v && k < 255 { k += 1; }
-  out.push(k as u8);                  // paire (longueur, valeur)
+  out.push(k as u8);   // paire (longueur, valeur)
   out.push(v);
-  i += k;                             // saute toute la suite
+  i += k;
 }
 ```
 
-- RLE : chaque suite d'octets identiques devient 2 octets au lieu de `k`.
-- Un bloc = une suite d'octets **sans aucun lien avec les autres blocs** :
-  c'est exactement ce qui rend la compression parallélisable.
-- 255 max par paire (1 octet pour la longueur).
+- Un bloc est compressible **tout seul** : c'est ce qui rend la compression
+  parallélisable. Un seul flux ne le serait pas.
 
-### `compresse_seq()` `src/main.rs:244` / `compresse_par()` `src/main.rs:249`
+### `compresse_seq()` `src/main.rs:178` / `compresse_par()` `src/main.rs:184`
 
 ```rust
-blocs.iter().map(|b| compresse_rle(b)).collect()          // seq : 1 bloc après l'autre
-blocs.par_iter().map(|b| compresse_rle(b)).collect()     // par : 64 blocs en même temps
+blocs.iter().map(|b| compresse_rle(b)).collect()      // seq
+blocs.par_iter().map(|b| compresse_rle(b)).collect()  // par
 ```
 
-- Même découpage `chunks(taille_bloc)` dans les deux cas → **octets identiques**.
-- `.collect()` garde l'ordre des blocs : rayon ne mélange rien.
+- Le découpage `chunks()` est fait une fois pour les deux variantes, donc
+  les octets compressés sont **identiques**.
 
-Contrôle dans `demo_compression()` `src/main.rs:254` :
-`64 Mo -> 6 Mo (x10.3 plus petit)`, `identique ? true`,
-`fichier reconstitue intact ? true` (aller-retour avec `decompresse()`).
+## 10. Une variante = une mesure honnête
 
-## 10. Outils console
+Chaque démonstration expose 2 variantes (`seq` et `par`) sous forme de
+fonctions `run_*` qui **préparent leurs données puis ne chronomètrent que le
+calcul** : sinon on mesurerait la création des tableaux.
 
-### `lire()` `src/main.rs:81`
+### `run_addition()` `src/main.rs:195`
 
 ```rust
-let mut s = String::new();          // buffer vide
-print!("> ");                       // invite
-io::stdout().flush().unwrap();      // force l'affichage immédiat
-io::stdin().read_line(&mut s).unwrap(); // bloque jusqu'à Entrée
-s.trim().to_string()                // nettoie "\n"/espaces, ex: "1"
+const PASSES: usize = 10;      // sinon le goulot est la mémoire, pas le CPU
+let a: Vec<f64> = (0..n).map(|i| i as f64).collect();     // hors chrono
+let mut c = vec![0.0; n];                                 // hors chrono
+let t0 = Instant::now();                                  // chrono start
+avec_pool(n_threads, || { for _ in 0..PASSES { vector_add_par(&a,&b,&mut c); } });
+let d = t0.elapsed();                                      // chrono stop
 ```
 
-### `avec_pool()` `src/main.rs:90` — fixer le nombre de threads
+- **Leçon** : une simple addition de 1 M de nombres ne gagne presque rien
+  (x1.5) car elle est limitée par la bande passante mémoire. Avec 10 passages,
+  on ajoute du calcul et le gain devient visible. Tout ne se parallélise pas
+  aussi bien — c'est le message principal de cet exemple.
+
+Les 5 fonctions : `run_addition` `:195`, `run_dot` `:224`, `run_pi` `:239`,
+`run_tri` `:252`, `run_compression` `:268`.
+
+## 11. Mesures : min / médiane / max
+
+### `mesurer()` `src/main.rs:307`
 
 ```rust
-ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap().install(f)
+for _ in 0..reps {
+    if ANNULATION.load(Ordering::Relaxed) { return None; }
+    durees.push(variante());
+}
+durees.sort();
+Some(Stats { min: durees[0], mediane: durees[reps / 2], max: durees[reps - 1] })
 ```
 
-- Crée un pool de exactement N travailleurs.
-- `install(f)` y exécute `f` et attend la fin.
-- On recrée le pool à chaque démo car le pool global rayon est fixe
-  au démarrage et ne permet pas de changer N depuis le menu.
-- Fonctionne aussi bien pour `f` qui renvoie `()` que pour `f` qui renvoie
-  une valeur (`usize`, `Vec<Vec<u8>>`, ...), via le générique `<T: Send>`.
+- Une seule mesure est du bruit (un autre processus, un turbo CPU...). On
+  répète 5 fois par défaut et on affiche min / médiane / max.
+- La **médiane** sert au calcul du gain : elle ignore les pics parasites.
+- `ANNULATION` `src/main.rs:287` permet de quitter l'écran sans attendre un
+  résultat qui ne sera plus affiché.
 
-## 11. Démos `src/main.rs:99,119,135,180,254` — toutes pareilles
+### `formater()` `src/main.rs:326` — le rapport affiché
 
-Pattern identique, exemple addition `src/main.rs:99` :
-
-```rust
-let a: Vec<f64> = (0..n).map(|i| i as f64).collect(); // a[i]=i
-let b: Vec<f64> = (0..n).map(|i| i as f64 * 2.0).collect(); // b[i]=2*i
-let t0 = Instant::now(); vector_add_seq(&a,&b,&mut c1); let d0 = t0.elapsed();
-let t1 = Instant::now(); avec_pool(n, || vector_add_par(&a,&b,&mut c2)); let d1 = t1.elapsed();
-println!("c[100] = {} (attendu 300)", c2[100]); // contrôle exact
-println!("identique ? {}", c1 == c2);           // seq et par doivent matcher
+```
+ seq  : min    39.6 ms  mediane    45.4 ms  max    74.2 ms
+ par  : min    29.8 ms  mediane    31.2 ms  max    37.6 ms
+ gain : x1.46 (seq / par, sur la mediane)
 ```
 
-- Scalaire attend `2000000` (= 1M × 1 × 2). Pi attend `3.141593`.
-- Tri attend `trie ? true` + `identique ? true`.
-- Compression attend `identique ? true` + `fichier reconstitue intact ? true`.
-- Si `c1 != c2` ou Pi faux → bug de parallélisme (ici jamais).
+- `gain = mediane_seq / mediane_par` : x1.46 veut dire « le parallèle a mis
+  1.46 fois moins de temps ».
 
-## 12. `main()` `src/main.rs:276` — boucle de menu
+### `Demo::controle()` `src/main.rs:415` — la vérification
+
+- Chaque démo compare sa sortie seq et sa sortie par (ou donne une valeur
+  de référence : `c[100] = 300`, `3.141593`, aller-retour de compression).
+- **Un contrôle `false` = bug de parallélisme.** Ici, toujours `true`.
+
+## 12. L'interface TUI
+
+### `lancer()` `src/main.rs:464` — le worker
 
 ```rust
-let mut n_threads = nb_threads();  // ex: 8 au démarrage
-loop {                              // infini jusqu'à "0"
-  // affiche 1,2,3,4,5,6,0
-  match lire().as_str() {           // lit le clavier
-    "1" => demo_addition(n_threads),// lance la démo avec N actuel
-    "2" => demo_dot(n_threads),
-    "3" => demo_pi(n_threads),
-    "5" => demo_tri(n_threads),
-    "6" => demo_compression(n_threads),
-    "4" => { lire().parse::<usize>() // convertit texte→nombre, accepte 1-64
-             n_threads = v; }        // mémorise le nouveau N
-    "0" => { println!("A bientot !"); break; } // sort du loop = fin
-    _ => println!("Tape 0-6."),     // entrée invalide, on reboucle
-  }
+let seq = match mesurer(reps, || {
+    let d = demo.run(n_threads, false).0;   // 1 répétition seq
+    let _ = tx.send(Etape::Avance { texte: ..., fait, total });  // previent l'écran
+    d
+}) { ... };
+```
+
+- Tout le calcul se fait dans **un thread à part** : l'interface ne freeze
+  jamais.
+- 3 phases : `reps` fois en seq, `reps` fois en par, puis 1 contrôle.
+
+### `maj_ecran()` `src/main.rs:520` — l'affichage
+
+```rust
+Etape::Avance { texte, fait, total } => {
+    siv.call_on_name("etape", |v: &mut TextView| v.set_content(texte));
+    siv.call_on_name("barre", |v: &mut ProgressBar| v.set_value((fait*100)/total));
 }
 ```
+
+- `call_on_name("barre", ...)` retrouve la vue par son nom et la modifie.
+
+### `main()` `src/main.rs:636` — la boucle
+
+```rust
+siv.set_fps(30);   // 30 images/s : la barre bouge même sans frappe
+siv.add_global_callback(Event::Refresh, move |siv| { /* vide le canal */ });
+```
+
+- Une **seule** callback globale écoute `Event::Refresh` (toutes les 1/30 s) :
+  elle vide le canal `mpsc` et met la barre à jour.
+- Le `Mutex` autour du `Receiver` est obligatoire : cursive exige des
+  callbacks `Send + Sync`, et un `Receiver` seul n'est que `Send`.
 
 ## 13. Comment ça fonctionne (à réciter)
 
 - `par_iter` découpe les données en morceaux, un par thread du pool.
 - Chaque thread calcule sa partie avec ses variables locales.
 - `.sum()` additionne les résultats partiels à la fin.
-- La fin de `for_each` / `sum` / `install` attend tous les threads.
 - Pour un **tri**, rayon fait tout : il découpe, trie, puis fusionne.
 - Pour un **gros fichier**, c'est nous qui le découpons en blocs, parce que
   rayon ne peut pas inventer un découpage qui a du sens pour le problème.
+- Pour l'**interface**, le calcul vit dans un thread et parle à l'écran
+  par un canal — jamais l'inverse.
 
 ## 14. Questions pièges
 
 - **Conflit d'écriture où ?** Dans `dot` / `pi` si `sum` était partagé.
   Évitée par sommes locales + `.sum()`.
-- **Découpage et attente où ?** Découpage par `par_iter` / pool,
-  attente à la fin de l'appel.
-- **Pourquoi `par_sort_unstable` marche sans rien écrire ?** Le tri parallèle
-  n'est pas un simple `map` : chaque morceau est trié indépendamment, puis
-  les morceaux triés sont fusionnés. C'est rayon qui fait le découpage.
-- **Pourquoi la compression marche ?** Parce qu'aucun bloc ne dépend d'un autre.
-  Si le fichier était compressé d'un seul tenant (un seul flux), le découpage
-  serait impossible : chaque bloc doit être compressible tout seul.
-- **Pourquoi les sorties seq et par sont-elles identiques ?** Le découpage est
-  fixé à l'avance (`chunks`) ou les données sont déterministes (`hashe(i)`),
-  et l'ordre des résultats est conservé par `.collect()`.
-- **Parfois par plus lent ?** Petit N : coût threads > gain. Trop de threads :
-  plus de threads que de coeurs. Teste option 4 avec 1, 2, 4, 8.
-- **En debug ?** Le tri prend ~2,5 s au lieu de ~90 ms : les comparaisons
-  non optimisées écrasent tout. Mesure toujours avec `cargo run --release`.
+- **Pourquoi mesurer 5 fois ?** Une seule mesure est du bruit. Min, médiane
+  et max le montrent, et la médiane donne le gain le plus fiable.
+- **Pourquoi préparer les données hors du chrono ?** Sinon on mesure
+  l'allocation mémoire, pas le calcul.
+- **Pourquoi l'addition ne gagne-t-elle que x1.5 ?** Elle est limitée par la
+  bande passante mémoire. Avec 10 passages (`PASSES`) on ajoute du calcul et
+  le gain devient visible.
+- **Pourquoi la compression marche ?** Parce qu'aucun bloc ne dépend d'un
+  autre. Un seul flux de compression ne serait pas découpable.
+- **Parfois par plus lent ?** Petit N : coût threads > gain. 1 thread est
+  toujours plus lent que le seq. Teste avec 1, 2, 4, 8, 16.
+- **En debug ?** Le tri prend ~30x plus longtemps : mesure toujours avec
+  `cargo run --release`.
